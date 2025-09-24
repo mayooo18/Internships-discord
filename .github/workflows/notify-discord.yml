@@ -1,0 +1,17 @@
+name: Notify Discord on Updates
+
+on:
+  push:   # triggers on any push to the repo
+    branches:
+      - main
+      - dev   # add/remove branches depending on what you track
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post update to Discord
+        run: |
+          curl -H "Content-Type: application/json" \
+               -d '{"content":"📢 Internship list updated! https://github.com/SimplifyJobs/Summer2026-Internships"}' \
+               ${{ secrets.DISCORD_WEBHOOK }}

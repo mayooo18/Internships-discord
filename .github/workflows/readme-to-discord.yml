@@ -1,0 +1,124 @@
+name: Notify Discord with new internships from README
+
+on:
+  push:
+    paths:
+      - "README.md"
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history so we can diff)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate diff of README.md
+        id: diff
+        shell: bash
+        run: |
+          BEFORE="${{ github.event.before }}"
+          AFTER="${{ github.sha }}"
+
+          # Handle the edge case where BEFORE is all zeros (first push on a branch)
+          if [[ "$BEFORE" == "0000000000000000000000000000000000000000" ]]; then
+            # Treat the entire README as added
+            git show "${AFTER}:README.md" > /tmp/README_after.txt || true
+            awk '{print "+" $0}' /tmp/README_after.txt > /tmp/added_lines.txt
+          else
+            git diff --no-color --unified=0 "$BEFORE" "$AFTER" -- README.md > /tmp/rdiff.txt || true
+            # Keep only lines that start with '+' but not '+++'
+            awk '/^\+[^+]/ {print substr($0,2)}' /tmp/rdiff.txt > /tmp/added_lines.txt
+          fi
+
+          # Remove obvious noise (optional: keep the bullets & markdown rows)
+          # You can tweak filters below if you want different behavior.
+          # Example: only keep list rows or table rows commonly used in this repo
+          awk '
+            # drop empty
+            length($0)==0 {next}
+            # keep markdown bullets, table rows, headings, or any line with a URL
+            /^[-*]|^\|/ {print; next}
+            /^\#\#? / {print; next}
+            /https?:\/\// {print; next}
+            # fallback: keep anything that looks like a company/role update
+            {print}
+          ' /tmp/added_lines.txt > /tmp/added_filtered.txt
+
+          ADDED_COUNT=$(wc -l < /tmp/added_filtered.txt | tr -d ' ')
+          echo "added_count=$ADDED_COUNT" >> $GITHUB_OUTPUT
+
+      - name: Post to Discord (summary + chunks)
+        if: steps.diff.outputs.added_count != '0'
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          REPO: ${{ github.repository }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          COMMIT_AUTHOR: ${{ github.event.head_commit.author.name }}
+        run: |
+          set -euo pipefail
+
+          COMPARE_URL="https://github.com/${REPO}/compare/${BEFORE}...${AFTER}"
+          COMMIT_URL="https://github.com/${REPO}/commit/${AFTER}"
+
+          # 1) Send a summary embed
+          SUMMARY=$(jq -n --arg repo "$REPO" --arg msg "$COMMIT_MSG" --arg author "$COMMIT_AUTHOR" \
+                         --arg curl "$COMPARE_URL" --arg cmu "$COMMIT_URL" '
+            {
+              "embeds": [{
+                "title": "📢 README updated (Internships list)",
+                "url": $curl,
+                "description": ("**Repo:** " + $repo + "\n**Author:** " + $author + "\n**Message:** " + $msg),
+                "fields": [
+                  {"name":"Compare","value":$curl,"inline":true},
+                  {"name":"Commit","value":$cmu,"inline":true}
+                ],
+                "footer": {"text":"GitHub → Discord"}
+              }]
+            }')
+
+          curl -sS -H "Content-Type: application/json" -d "$SUMMARY" "$WEBHOOK" > /dev/null
+
+          # 2) Send the actual new lines, chunked to fit Discord limits
+          # Discord hard limit ~2000 chars per message. Keep buffer for boilerplate.
+          MAX=1800
+          buf=""
+          count=0
+
+          while IFS= read -r line; do
+            # Escape backticks gently for code blocks
+            safe_line="${line//\`/ʼ}"  # replace backticks with a lookalike
+            if (( ${#buf} + ${#safe_line} + 1 > MAX )); then
+              # flush
+              payload=$(jq -n --arg content "New entries:\n\`\`\`\n$buf\n\`\`\`" '{content:$content}')
+              curl -sS -H "Content-Type: application/json" -d "$payload" "$WEBHOOK" > /dev/null
+              buf=""
+            fi
+            if [[ -z "$buf" ]]; then
+              buf="$safe_line"
+            else
+              buf="$buf"$'\n'"$safe_line"
+            fi
+            count=$((count+1))
+          done < /tmp/added_filtered.txt
+
+          # final flush
+          if [[ -n "$buf" ]]; then
+            payload=$(jq -n --arg content "New entries:\n\`\`\`\n$buf\n\`\`\`" '{content:$content}')
+            curl -sS -H "Content-Type: application/json" -d "$payload" "$WEBHOOK" > /dev/null
+          fi
+
+      - name: Post to Discord (no-op notice)
+        if: steps.diff.outputs.added_count == '0'
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          REPO: ${{ github.repository }}
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          COMPARE_URL="https://github.com/${REPO}/compare/${BEFORE}...${AFTER}"
+          payload=$(jq -n --arg content "README.md changed but no new lines detected (likely edits/removals only). $COMPARE_URL" '{content:$content}')
+          curl -sS -H "Content-Type: application/json" -d "$payload" "$WEBHOOK" > /dev/null

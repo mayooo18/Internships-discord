@@ -1,0 +1,60 @@
+name: Daily sync from upstream
+
+on:
+  schedule:
+    # Runs daily at 15:00 UTC (10:00 AM Chicago during CDT, 9:00 AM during CST)
+    - cron: "0 15 * * *"
+  workflow_dispatch:
+
+jobs:
+  sync:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git author (actions bot)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream and fetch
+        run: |
+          # Add upstream remote if not present
+          git remote add upstream https://github.com/SimplifyJobs/Summer2026-Internships.git || true
+          git fetch upstream
+
+      - name: Rebase main onto upstream/main (fallback to ff-merge)
+        id: rebase
+        shell: bash
+        run: |
+          set -e
+          git checkout main
+          BEFORE=$(git rev-parse HEAD)
+          echo "BEFORE=$BEFORE" >> $GITHUB_ENV
+
+          # Try a clean rebase first; if it fails, abort and try fast-forward merge
+          if git rebase upstream/main; then
+            echo "Rebase succeeded."
+          else
+            echo "Rebase failed; aborting and attempting fast-forward merge."
+            git rebase --abort || true
+            git merge --ff-only upstream/main
+          fi
+
+          AFTER=$(git rev-parse HEAD)
+          echo "AFTER=$AFTER" >> $GITHUB_ENV
+
+      - name: Push if updated
+        shell: bash
+        run: |
+          if [ "$BEFORE" != "$AFTER" ]; then
+            echo "Changes detected; pushing to origin/main..."
+            git push origin main
+          else
+            echo "No changes to push."
+          fi
